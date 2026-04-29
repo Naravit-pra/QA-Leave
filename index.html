@@ -1,0 +1,767 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QA Leave Hub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="./google-sheet-config.js"></script>
+  </head>
+  <body class="bg-slate-50">
+    <div id="root">
+      <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f8fafc;color:#334155;font-family:Arial,sans-serif;padding:24px;text-align:center">
+        <div>
+          <div style="font-size:24px;font-weight:800;margin-bottom:8px">กำลังโหลด QA Leave Hub</div>
+          <div style="font-size:14px;color:#64748b">ถ้าค้างหน้านี้ ให้ตรวจสอบอินเทอร์เน็ตหรือเปิด Console เพื่อดู error</div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      window.addEventListener("error", function (event) {
+        var root = document.getElementById("root");
+        if (!root) return;
+        root.innerHTML =
+          '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#fff1f2;color:#9f1239;font-family:Arial,sans-serif;padding:24px;text-align:center">' +
+          '<div><div style="font-size:22px;font-weight:800;margin-bottom:8px">โหลดแอปไม่สำเร็จ</div>' +
+          '<div style="font-size:14px;max-width:720px;word-break:break-word">' +
+          (event.message || "Unknown error") +
+          "</div></div></div>";
+      });
+    </script>
+
+    <script type="text/babel">
+      const { useEffect, useMemo, useRef, useState } = React;
+      const { createRoot } = ReactDOM;
+
+      const makeIcon = (label) => function Icon({ className = "", size = 20 }) {
+        return (
+          <span
+            aria-hidden="true"
+            className={`inline-flex items-center justify-center font-black leading-none ${className}`}
+            style={{ width: size, height: size, fontSize: Math.max(10, Math.round(size * 0.58)) }}
+          >
+            {label}
+          </span>
+        );
+      };
+
+      const Activity = makeIcon("A");
+      const AlertCircle = makeIcon("!");
+      const BarChart3 = makeIcon("B");
+      const Briefcase = makeIcon("W");
+      const CheckCircle2 = makeIcon("OK");
+      const Clock = makeIcon("T");
+      const Download = makeIcon("DL");
+      const FileSpreadsheet = makeIcon("XL");
+      const FileText = makeIcon("TXT");
+      const History = makeIcon("H");
+      const Home = makeIcon("WFH");
+      const LayoutDashboard = makeIcon("D");
+      const Palmtree = makeIcon("V");
+      const PlusCircle = makeIcon("+");
+      const Settings = makeIcon("S");
+      const Stethoscope = makeIcon("M");
+      const Trash2 = makeIcon("X");
+      const TrendingUp = makeIcon("UP");
+      const Upload = makeIcon("UL");
+      const Users = makeIcon("U");
+
+      const LEAVE_TYPES = [
+        { id: "sick", label: "ลาป่วย", icon: Stethoscope, color: "bg-rose-500", text: "text-rose-600", light: "bg-rose-50" },
+        { id: "vacation", label: "ลาพักร้อน", icon: Palmtree, color: "bg-emerald-500", text: "text-emerald-600", light: "bg-emerald-50" },
+        { id: "personal", label: "ลากิจ", icon: Briefcase, color: "bg-amber-500", text: "text-amber-600", light: "bg-amber-50" },
+        { id: "wfh", label: "WFH", icon: Home, color: "bg-sky-500", text: "text-sky-600", light: "bg-sky-50" },
+      ];
+
+      const getLeaveType = (type) => LEAVE_TYPES.find((item) => item.id === type) || LEAVE_TYPES[0];
+
+      function getApiUrl() {
+        return window.QA_LEAVE_HUB_API_URL || localStorage.getItem("qaLeaveHub.apiUrl") || "";
+      }
+
+      async function parseApiResponse(response) {
+        const text = await response.text();
+        let payload;
+
+        try {
+          payload = JSON.parse(text);
+        } catch (error) {
+          throw new Error("API ไม่ได้ส่ง JSON กลับมา โปรดตรวจสอบสิทธิ์ Apps Script deployment");
+        }
+
+        if (!response.ok || payload.ok === false) {
+          throw new Error(payload.error || `API error ${response.status}`);
+        }
+
+        return payload;
+      }
+
+      async function apiGetLeaves(apiUrl) {
+        const response = await fetch(`${apiUrl}?action=list`, {
+          method: "GET",
+          cache: "no-store",
+        });
+        const payload = await parseApiResponse(response);
+        return Array.isArray(payload.data) ? payload.data : [];
+      }
+
+      async function apiCreateLeave(apiUrl, data) {
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          body: JSON.stringify({
+            action: "create",
+            data,
+          }),
+        });
+        const payload = await parseApiResponse(response);
+        return payload.data;
+      }
+
+      async function apiBulkCreateLeaves(apiUrl, rows) {
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          body: JSON.stringify({
+            action: "bulkCreate",
+            data: rows,
+          }),
+        });
+        const payload = await parseApiResponse(response);
+        return Array.isArray(payload.data) ? payload.data : [];
+      }
+
+      function App() {
+        const [apiUrl, setApiUrl] = useState(getApiUrl);
+        const [apiUrlText, setApiUrlText] = useState("");
+        const [view, setView] = useState("dashboard");
+        const [leaves, setLeaves] = useState([]);
+        const [loading, setLoading] = useState(Boolean(apiUrl));
+        const [loadError, setLoadError] = useState("");
+        const [formSubmitting, setFormSubmitting] = useState(false);
+        const [importing, setImporting] = useState(false);
+        const [importStatus, setImportStatus] = useState(null);
+        const [xlsxReady, setXlsxReady] = useState(false);
+        const fileInputRef = useRef(null);
+
+        const [formData, setFormData] = useState({
+          name: "",
+          type: "sick",
+          startDate: "",
+          endDate: "",
+          reason: "",
+        });
+
+        useEffect(() => {
+          const script = document.createElement("script");
+          script.src = "https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js";
+          script.async = true;
+          script.onload = () => setXlsxReady(true);
+          script.onerror = () => setImportStatus("โหลดตัวอ่านไฟล์ Excel ไม่สำเร็จ");
+          document.body.appendChild(script);
+
+          return () => {
+            document.body.removeChild(script);
+          };
+        }, []);
+
+        const loadLeaves = async () => {
+          if (!apiUrl) {
+            setLoading(false);
+            return;
+          }
+
+          setLoading(true);
+          setLoadError("");
+
+          try {
+            const data = await apiGetLeaves(apiUrl);
+            setLeaves(sortLeaves(data));
+          } catch (error) {
+            console.error(error);
+            setLoadError(error.message || "โหลดข้อมูลจาก Google Sheet ไม่สำเร็จ");
+          } finally {
+            setLoading(false);
+          }
+        };
+
+        useEffect(() => {
+          loadLeaves();
+        }, [apiUrl]);
+
+        const teamStats = useMemo(() => {
+          const counts = { sick: 0, vacation: 0, personal: 0, wfh: 0, total: leaves.length };
+          leaves.forEach((leave) => {
+            if (Object.prototype.hasOwnProperty.call(counts, leave.type)) {
+              counts[leave.type] += 1;
+            }
+          });
+          return counts;
+        }, [leaves]);
+
+        const memberStats = useMemo(() => {
+          const statsMap = {};
+          leaves.forEach((leave) => {
+            const name = leave.name || "ไม่ระบุชื่อ";
+            if (!statsMap[name]) statsMap[name] = { sick: 0, vacation: 0, personal: 0, wfh: 0, total: 0 };
+            if (Object.prototype.hasOwnProperty.call(statsMap[name], leave.type)) {
+              statsMap[name][leave.type] += 1;
+            }
+            statsMap[name].total += 1;
+          });
+          return Object.entries(statsMap).sort((a, b) => b[1].total - a[1].total);
+        }, [leaves]);
+
+        const saveApiUrl = (event) => {
+          event.preventDefault();
+          const nextUrl = apiUrlText.trim();
+          if (!nextUrl) return;
+          localStorage.setItem("qaLeaveHub.apiUrl", nextUrl);
+          setApiUrl(nextUrl);
+        };
+
+        const resetApiUrl = () => {
+          localStorage.removeItem("qaLeaveHub.apiUrl");
+          window.location.reload();
+        };
+
+        const handleSubmit = async (event) => {
+          event.preventDefault();
+
+          const start = new Date(formData.startDate);
+          const end = new Date(formData.endDate);
+          if (end < start) {
+            alert("วันสิ้นสุดต้องไม่ก่อนวันเริ่มต้น");
+            return;
+          }
+
+          const newLeave = {
+            id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+            ...formData,
+            status: "pending",
+            createdAt: new Date().toISOString(),
+          };
+
+          setFormSubmitting(true);
+          try {
+            const created = await apiCreateLeave(apiUrl, newLeave);
+            setLeaves((current) => sortLeaves([created || newLeave, ...current]));
+            setFormData({ name: "", type: "sick", startDate: "", endDate: "", reason: "" });
+            setView("dashboard");
+          } catch (error) {
+            console.error(error);
+            alert(error.message || "บันทึกข้อมูลไม่สำเร็จ กรุณาลองใหม่");
+          } finally {
+            setFormSubmitting(false);
+          }
+        };
+
+        const mapType = (value) => {
+          if (!value) return "sick";
+
+          const normalized = value.toString().trim().toLowerCase();
+          if (normalized.includes("ป่วย") || normalized.includes("sick")) return "sick";
+          if (normalized.includes("พักร้อน") || normalized.includes("vacation") || normalized.includes("annual")) return "vacation";
+          if (normalized.includes("กิจ") || normalized.includes("personal")) return "personal";
+          if (normalized.includes("wfh") || normalized.includes("work from home")) return "wfh";
+          return "sick";
+        };
+
+        const normalizeExcelDate = (value) => {
+          if (!value) return "";
+          if (value instanceof Date) return value.toISOString().slice(0, 10);
+          return value.toString();
+        };
+
+        const handleExcelImport = async (event) => {
+          const file = event.target.files?.[0];
+          if (!file) return;
+
+          if (!window.XLSX || !xlsxReady) {
+            setImportStatus("ตัวอ่านไฟล์ Excel ยังโหลดไม่เสร็จ กรุณารอสักครู่แล้วลองใหม่");
+            if (fileInputRef.current) fileInputRef.current.value = "";
+            return;
+          }
+
+          setImporting(true);
+          setImportStatus("กำลังอ่านไฟล์...");
+
+          const reader = new FileReader();
+          reader.onload = async (readerEvent) => {
+            try {
+              const workbook = window.XLSX.read(readerEvent.target.result, {
+                type: "array",
+                cellDates: true,
+              });
+              const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+              const rows = window.XLSX.utils.sheet_to_json(worksheet);
+
+              if (rows.length === 0) {
+                setImportStatus("ไม่พบข้อมูลในไฟล์");
+                return;
+              }
+
+              const now = new Date().toISOString();
+              const mappedRows = rows.map((row, index) => ({
+                id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${index}`,
+                name: row["ชื่อ"] || row.Name || row.name || "ไม่ระบุชื่อ",
+                type: mapType(row["ประเภท"] || row.Type || row.type),
+                startDate: normalizeExcelDate(row["เริ่ม"] || row.StartDate || row.start || row.startDate),
+                endDate: normalizeExcelDate(row["สิ้นสุด"] || row.EndDate || row.end || row.endDate),
+                reason: row["เหตุผล"] || row.Reason || row.reason || "",
+                status: "approved",
+                createdAt: now,
+              }));
+
+              setImportStatus(`กำลังนำเข้า ${mappedRows.length} รายการ...`);
+              const createdRows = await apiBulkCreateLeaves(apiUrl, mappedRows);
+              setLeaves((current) => sortLeaves([...(createdRows.length ? createdRows : mappedRows), ...current]));
+              setImportStatus(`สำเร็จ! นำเข้าข้อมูล ${mappedRows.length} รายการเรียบร้อยแล้ว`);
+            } catch (error) {
+              console.error(error);
+              setImportStatus(error.message || "เกิดข้อผิดพลาดในการนำเข้าข้อมูล");
+            } finally {
+              setImporting(false);
+              if (fileInputRef.current) fileInputRef.current.value = "";
+            }
+          };
+          reader.onerror = () => {
+            setImportStatus("อ่านไฟล์ไม่สำเร็จ");
+            setImporting(false);
+          };
+          reader.readAsArrayBuffer(file);
+        };
+
+        const exportJson = () => {
+          const blob = new Blob([JSON.stringify(leaves, null, 2)], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `qa-leave-hub-${new Date().toISOString().slice(0, 10)}.json`;
+          link.click();
+          URL.revokeObjectURL(url);
+        };
+
+        if (!apiUrl) {
+          return (
+            <div className="min-h-screen bg-slate-50 p-4 flex items-center justify-center">
+              <form onSubmit={saveApiUrl} className="w-full max-w-2xl bg-white border border-slate-100 rounded-3xl p-8 shadow-sm">
+                <div className="flex items-center gap-3 mb-6">
+                  <div className="p-3 bg-indigo-100 text-indigo-600 rounded-2xl">
+                    <Settings size={24} />
+                  </div>
+                  <div>
+                    <h1 className="text-2xl font-black text-slate-800">ตั้งค่า QA Leave Hub</h1>
+                    <p className="text-sm text-slate-500">วาง Google Apps Script Web App URL เพื่อเริ่มใช้งาน</p>
+                  </div>
+                </div>
+                <input
+                  className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl font-mono text-sm focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 focus:outline-none"
+                  value={apiUrlText}
+                  onChange={(event) => setApiUrlText(event.target.value)}
+                  placeholder="https://script.google.com/macros/s/.../exec"
+                  required
+                />
+                <button className="mt-5 w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-2xl transition-all">
+                  บันทึกและเริ่มใช้งาน
+                </button>
+              </form>
+            </div>
+          );
+        }
+
+        if (loading) {
+          return (
+            <div className="min-h-screen flex items-center justify-center bg-slate-50">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+            </div>
+          );
+        }
+
+        return (
+          <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-20 md:pb-0 md:pl-64">
+            <nav className="fixed left-0 top-0 bottom-0 w-64 bg-white border-r border-slate-200 hidden md:flex flex-col p-6 z-20">
+              <div className="flex items-center gap-3 mb-10 px-2">
+                <div className="p-2 bg-indigo-600 rounded-lg shadow-lg shadow-indigo-100">
+                  <Activity className="text-white w-6 h-6" />
+                </div>
+                <h1 className="text-xl font-bold tracking-tight">QA Leave Hub</h1>
+              </div>
+
+              <div className="space-y-1">
+                <NavItem active={view === "dashboard"} onClick={() => setView("dashboard")} icon={LayoutDashboard} label="ภาพรวมระบบ" />
+                <NavItem active={view === "member-stats"} onClick={() => setView("member-stats")} icon={Users} label="สถิติรายบุคคล" />
+                <NavItem active={view === "request"} onClick={() => setView("request")} icon={PlusCircle} label="ส่งคำขอการลา" />
+                <NavItem active={view === "history"} onClick={() => setView("history")} icon={History} label="ประวัติทั้งหมด" />
+                <NavItem active={view === "settings"} onClick={() => setView("settings")} icon={Settings} label="ตั้งค่า" />
+              </div>
+
+              <div className="mt-auto p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                <p className="text-[10px] font-bold text-slate-400 mb-2 uppercase tracking-widest">Data Source</p>
+                <p className="text-[10px] font-mono text-slate-400 break-all opacity-60 leading-tight truncate">Google Sheets</p>
+              </div>
+            </nav>
+
+            <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex justify-around p-3 md:hidden z-20 shadow-xl">
+              <MobileNavItem active={view === "dashboard"} onClick={() => setView("dashboard")} icon={LayoutDashboard} label="Home" />
+              <MobileNavItem active={view === "member-stats"} onClick={() => setView("member-stats")} icon={Users} label="Stats" />
+              <MobileNavItem active={view === "request"} onClick={() => setView("request")} icon={PlusCircle} label="Add" />
+              <MobileNavItem active={view === "settings"} onClick={() => setView("settings")} icon={Settings} label="Setup" />
+            </nav>
+
+            <main className="p-4 md:p-10 max-w-6xl mx-auto">
+              {loadError && (
+                <div className="mb-6 p-4 bg-rose-50 text-rose-700 rounded-2xl text-sm font-bold flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center gap-3">
+                    <AlertCircle size={18} /> {loadError}
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={loadLeaves} className="rounded-xl bg-white px-4 py-2 text-xs font-black text-rose-700 shadow-sm hover:bg-rose-100">
+                      โหลดใหม่
+                    </button>
+                    <button onClick={resetApiUrl} className="rounded-xl bg-white px-4 py-2 text-xs font-black text-rose-700 shadow-sm hover:bg-rose-100">
+                      ล้าง API URL
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {view === "dashboard" && (
+                <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                  <div className="mb-8 flex justify-between items-end">
+                    <div>
+                      <h2 className="text-3xl font-extrabold text-slate-800">แดชบอร์ดทีม</h2>
+                      <p className="text-slate-500 mt-1">สรุปข้อมูลการลา ณ ปัจจุบัน</p>
+                    </div>
+                    <button onClick={() => setView("request")} className="hidden md:flex items-center gap-2 bg-indigo-600 text-white px-5 py-2.5 rounded-xl font-bold text-sm shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all">
+                      <PlusCircle size={18} /> ส่งใบลา
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                    {LEAVE_TYPES.map((type) => (
+                      <StatCard key={type.id} label={type.label} value={teamStats[type.id]} icon={type.icon} color={type.color} />
+                    ))}
+                  </div>
+
+                  <div className="bg-white rounded-3xl p-8 shadow-sm border border-slate-100">
+                    <h3 className="text-lg font-bold flex items-center gap-2 mb-6">
+                      <Clock className="text-indigo-500" size={20} /> รายการล่าสุด
+                    </h3>
+                    {leaves.length === 0 ? (
+                      <EmptyState icon={FileText} text="ยังไม่มีข้อมูลในระบบ" />
+                    ) : (
+                      <div className="grid gap-3">
+                        {leaves.slice(0, 6).map((item) => {
+                          const leaveType = getLeaveType(item.type);
+                          return (
+                            <div key={item.id || `${item.name}-${item.createdAt}`} className="flex items-center justify-between p-4 md:p-5 rounded-2xl border border-slate-50 hover:border-indigo-100 hover:bg-indigo-50/20 transition-all group">
+                              <div className="flex items-center gap-4 md:gap-5">
+                                <div className={`p-3 rounded-2xl ${leaveType.color} bg-opacity-10 group-hover:bg-opacity-20 transition-all`}>
+                                  <leaveType.icon className={leaveType.text} size={22} />
+                                </div>
+                                <div>
+                                  <p className="font-bold text-slate-800">{item.name || "ไม่ระบุชื่อ"}</p>
+                                  <div className="flex flex-wrap items-center gap-x-2 text-[10px] md:text-xs text-slate-400 font-medium">
+                                    <span className={leaveType.text}>{leaveType.label}</span>
+                                    <span>•</span>
+                                    <span>{item.startDate || "-"} - {item.endDate || "-"}</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <StatusBadge status={item.status} />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {view === "member-stats" && (
+                <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                  <div className="mb-8">
+                    <h2 className="text-3xl font-extrabold text-slate-800">สถิติรายบุคคล</h2>
+                    <p className="text-slate-500 mt-1">สรุปจำนวนรายการลาแยกตามพนักงาน</p>
+                  </div>
+                  {memberStats.length === 0 ? (
+                    <div className="bg-white rounded-3xl p-20 text-center border border-slate-100">
+                      <BarChart3 className="mx-auto mb-4 text-slate-200" size={80} />
+                      <p className="text-slate-400 font-medium text-lg">ยังไม่มีข้อมูลให้แสดงผล</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      {memberStats.map(([name, data]) => (
+                        <div key={name} className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 hover:shadow-md transition-all">
+                          <div className="flex items-center justify-between mb-6 gap-4">
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-12 h-12 bg-indigo-600 text-white rounded-2xl flex items-center justify-center font-bold text-xl uppercase shadow-inner shrink-0">
+                                {name.substring(0, 1)}
+                              </div>
+                              <div className="min-w-0">
+                                <h4 className="font-bold text-xl text-slate-800 leading-tight truncate">{name}</h4>
+                                <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mt-0.5">รวม {data.total} ครั้ง</p>
+                              </div>
+                            </div>
+                            <div className="bg-indigo-50 text-indigo-600 px-3 py-1 rounded-full text-[10px] font-black flex items-center gap-1 uppercase shrink-0">
+                              <TrendingUp size={12} /> Active
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-4 gap-2 mb-6">
+                            {LEAVE_TYPES.map((type) => (
+                              <div key={type.id} className={`${type.light} p-3 rounded-2xl flex flex-col items-center justify-center`}>
+                                <span className={`text-sm font-black ${type.text}`}>{data[type.id]}</span>
+                                <span className="text-[9px] font-bold text-slate-400 uppercase mt-0.5 text-center leading-none">{type.label}</span>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="w-full bg-slate-50 h-2 rounded-full overflow-hidden flex">
+                            {LEAVE_TYPES.map((type) => {
+                              const percentage = data.total > 0 ? (data[type.id] / data.total) * 100 : 0;
+                              return percentage > 0 ? (
+                                <div key={type.id} className={`${type.color} h-full`} style={{ width: `${percentage}%` }} />
+                              ) : null;
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {view === "request" && (
+                <div className="max-w-2xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
+                  <div className="mb-8">
+                    <h2 className="text-3xl font-extrabold text-slate-800">ส่งใบลา</h2>
+                    <p className="text-slate-500 mt-1">กรอกข้อมูลเพื่อบันทึกคำขอการลาใน Google Sheet</p>
+                  </div>
+                  <form onSubmit={handleSubmit} className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 space-y-6">
+                    <Field label="ชื่อผู้ลา">
+                      <input required type="text" value={formData.name} onChange={(event) => setFormData({ ...formData, name: event.target.value })} className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 focus:outline-none transition-all" placeholder="เช่น พี่อาร์ท, อิคคิว" />
+                    </Field>
+                    <Field label="ประเภทการลา">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        {LEAVE_TYPES.map((type) => (
+                          <button key={type.id} type="button" onClick={() => setFormData({ ...formData, type: type.id })} className={`p-4 rounded-2xl border-2 flex flex-col items-center justify-center gap-2 transition-all ${formData.type === type.id ? `border-indigo-600 bg-indigo-50 ${type.text}` : "border-slate-50 bg-white text-slate-400 hover:border-slate-200"}`}>
+                            <type.icon size={26} />
+                            <span className="text-[10px] font-black uppercase">{type.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </Field>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <Field label="เริ่มวันที่">
+                        <input required type="date" value={formData.startDate} onChange={(event) => setFormData({ ...formData, startDate: event.target.value })} className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-4 focus:ring-indigo-100 focus:outline-none" />
+                      </Field>
+                      <Field label="สิ้นสุดวันที่">
+                        <input required type="date" value={formData.endDate} onChange={(event) => setFormData({ ...formData, endDate: event.target.value })} className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-4 focus:ring-indigo-100 focus:outline-none" />
+                      </Field>
+                    </div>
+                    <Field label="สาเหตุการลา">
+                      <textarea required rows="3" value={formData.reason} onChange={(event) => setFormData({ ...formData, reason: event.target.value })} className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl focus:ring-4 focus:ring-indigo-100 focus:outline-none transition-all" placeholder="ปวดท้อง, ไปหาหมอ, ธุระด่วน..." />
+                    </Field>
+                    <button type="submit" disabled={formSubmitting} className="w-full py-5 bg-indigo-600 hover:bg-indigo-700 text-white font-black text-lg rounded-2xl shadow-xl shadow-indigo-100 transition-all flex items-center justify-center gap-3 disabled:opacity-50">
+                      {formSubmitting ? "กำลังบันทึก..." : <><CheckCircle2 size={24} /> บันทึกข้อมูลใบลา</>}
+                    </button>
+                  </form>
+                </div>
+              )}
+
+              {view === "history" && (
+                <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                  <div className="mb-8">
+                    <h2 className="text-3xl font-extrabold text-slate-800">ประวัติการลาทั้งหมด</h2>
+                    <p className="text-slate-500 mt-2">รายการลาทั้งหมดที่บันทึกไว้ใน Google Sheet</p>
+                  </div>
+                  <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead>
+                          <tr className="bg-slate-50 text-slate-400 text-[10px] font-black uppercase tracking-widest border-b border-slate-100">
+                            <th className="px-8 py-5">พนักงาน</th>
+                            <th className="px-6 py-5">หมวดหมู่</th>
+                            <th className="px-6 py-5">ระยะเวลา</th>
+                            <th className="px-6 py-5">เหตุผล</th>
+                            <th className="px-8 py-5 text-right">สถานะ</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                          {leaves.map((item) => {
+                            const leaveType = getLeaveType(item.type);
+                            return (
+                              <tr key={item.id || `${item.name}-${item.createdAt}`} className="hover:bg-slate-50/50 transition-colors">
+                                <td className="px-8 py-5 font-bold text-slate-900">{item.name || "ไม่ระบุชื่อ"}</td>
+                                <td className="px-6 py-5">
+                                  <span className={`inline-flex items-center gap-2 font-bold text-xs ${leaveType.text}`}>
+                                    <div className={`w-2 h-2 rounded-full ${leaveType.color}`}></div>
+                                    {leaveType.label}
+                                  </span>
+                                </td>
+                                <td className="px-6 py-5 text-sm text-slate-600 font-medium">
+                                  {item.startDate || "-"} <span className="text-slate-200">→</span> {item.endDate || "-"}
+                                </td>
+                                <td className="px-6 py-5 text-sm text-slate-400 max-w-[200px] truncate">{item.reason || "-"}</td>
+                                <td className="px-8 py-5 text-right">
+                                  <StatusBadge status={item.status} />
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {view === "settings" && (
+                <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                  <div className="mb-8">
+                    <h2 className="text-3xl font-extrabold text-slate-800">ตั้งค่าระบบ</h2>
+                    <p className="text-slate-500 mt-1">จัดการข้อมูลพื้นฐานและการนำเข้าข้อมูล</p>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="bg-white rounded-3xl p-8 shadow-sm border border-slate-100">
+                      <div className="flex items-center gap-3 mb-6">
+                        <div className="p-3 bg-emerald-100 text-emerald-600 rounded-2xl">
+                          <FileSpreadsheet size={24} />
+                        </div>
+                        <h3 className="text-xl font-bold">นำเข้าข้อมูลจาก Excel</h3>
+                      </div>
+
+                      <p className="text-sm text-slate-500 mb-6 leading-relaxed">
+                        รองรับไฟล์ Excel (.xlsx, .xls) หรือ CSV โดยใช้หัวตาราง:
+                        <br />
+                        <code className="bg-slate-50 px-2 py-1 rounded text-indigo-600 font-bold">ชื่อ, ประเภท, เริ่ม, สิ้นสุด, เหตุผล</code>
+                      </p>
+
+                      <div onClick={() => !importing && fileInputRef.current?.click()} className={`border-2 border-dashed rounded-3xl p-10 flex flex-col items-center justify-center cursor-pointer transition-all ${importing ? "bg-slate-50 border-slate-200" : "border-indigo-100 hover:border-indigo-400 hover:bg-indigo-50/30"}`}>
+                        <input type="file" ref={fileInputRef} className="hidden" accept=".xlsx,.xls,.csv" onChange={handleExcelImport} disabled={importing} />
+                        {importing ? (
+                          <div className="text-center">
+                            <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600 mx-auto mb-4"></div>
+                            <p className="font-bold text-indigo-600">{importStatus}</p>
+                          </div>
+                        ) : (
+                          <>
+                            <Upload className="text-indigo-400 mb-4" size={48} />
+                            <p className="font-bold text-slate-700">คลิกเพื่ออัปโหลดไฟล์</p>
+                            <p className="text-xs text-slate-400 mt-1">{xlsxReady ? "รองรับ .xlsx, .xls, .csv" : "กำลังโหลดตัวอ่านไฟล์..."}</p>
+                          </>
+                        )}
+                      </div>
+
+                      {importStatus && !importing && (
+                        <div className="mt-4 p-4 bg-emerald-50 text-emerald-700 rounded-2xl text-sm flex items-center gap-3 font-medium">
+                          <CheckCircle2 size={18} /> {importStatus}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="bg-white rounded-3xl p-8 shadow-sm border border-slate-100 flex flex-col">
+                      <div className="flex items-center gap-3 mb-6 text-indigo-600">
+                        <div className="p-3 bg-indigo-100 rounded-2xl">
+                          <Settings size={24} />
+                        </div>
+                        <h3 className="text-xl font-bold">Google Sheet API</h3>
+                      </div>
+                      <p className="text-sm text-slate-500 mb-4 leading-relaxed break-all">
+                        {apiUrl}
+                      </p>
+                      <div className="mt-auto space-y-4">
+                        <button onClick={loadLeaves} className="w-full py-4 px-6 bg-indigo-600 text-white rounded-2xl font-bold text-sm flex items-center justify-between hover:bg-indigo-700">
+                          โหลดข้อมูลใหม่
+                          <Clock size={18} />
+                        </button>
+                        <button onClick={exportJson} className="w-full py-4 px-6 border-2 border-slate-100 rounded-2xl text-slate-600 font-bold text-sm flex items-center justify-between hover:bg-slate-50">
+                          ดาวน์โหลดสำรองข้อมูล (JSON)
+                          <Download size={18} />
+                        </button>
+                        <button onClick={resetApiUrl} className="w-full py-4 px-6 bg-rose-50 text-rose-600 rounded-2xl font-bold text-sm flex items-center justify-between hover:bg-rose-100">
+                          ล้าง API URL ในเครื่องนี้
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </main>
+          </div>
+        );
+      }
+
+      function sortLeaves(items) {
+        return [...items].sort((a, b) => {
+          const bTime = new Date(b.createdAt || 0).getTime();
+          const aTime = new Date(a.createdAt || 0).getTime();
+          return bTime - aTime;
+        });
+      }
+
+      function Field({ children, label }) {
+        return (
+          <div>
+            <label className="block text-sm font-bold text-slate-700 mb-2">{label}</label>
+            {children}
+          </div>
+        );
+      }
+
+      function NavItem({ active, onClick, icon: Icon, label }) {
+        return (
+          <button onClick={onClick} className={`w-full flex items-center gap-4 px-5 py-4 rounded-2xl transition-all ${active ? "bg-indigo-600 text-white font-bold shadow-lg shadow-indigo-100" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`}>
+            <Icon size={20} className={active ? "text-white" : "text-slate-400"} />
+            <span className="text-sm tracking-tight">{label}</span>
+          </button>
+        );
+      }
+
+      function MobileNavItem({ active, onClick, icon: Icon, label }) {
+        return (
+          <button onClick={onClick} className={`flex flex-col items-center gap-1 transition-all px-2 ${active ? "text-indigo-600" : "text-slate-400"}`}>
+            <Icon size={22} />
+            <span className="text-[10px] font-bold uppercase tracking-tighter">{label}</span>
+          </button>
+        );
+      }
+
+      function StatCard({ label, value, icon: Icon, color }) {
+        return (
+          <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-50 flex flex-col items-center text-center group hover:border-indigo-100 transition-all">
+            <div className={`p-4 rounded-2xl ${color} bg-opacity-10 mb-4 group-hover:scale-110 transition-transform`}>
+              <Icon className={color.replace("bg-", "text-")} size={26} />
+            </div>
+            <span className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">{label}</span>
+            <span className="text-4xl font-black text-slate-800 tracking-tight">{value}</span>
+          </div>
+        );
+      }
+
+      function StatusBadge({ status }) {
+        const approved = status === "approved";
+        return (
+          <span className={`hidden sm:inline-block text-[10px] uppercase font-black tracking-widest px-3 py-1 rounded-full ${approved ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+            {approved ? "approved" : "pending"}
+          </span>
+        );
+      }
+
+      function EmptyState({ icon: Icon, text }) {
+        return (
+          <div className="py-20 text-center text-slate-300">
+            <Icon className="mx-auto mb-4 opacity-10" size={80} />
+            <p className="text-lg font-medium">{text}</p>
+          </div>
+        );
+      }
+
+      createRoot(document.getElementById("root")).render(<App />);
+    </script>
+  </body>
+</html>
